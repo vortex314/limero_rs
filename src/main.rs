@@ -349,6 +349,15 @@ impl Echo {
     }
 }
 
+fn mapper(x: Msg) -> Option<Msg> {
+    Some(Msg {
+        i32: x.i32 + 1,
+        i64: x.i64 + 1,
+        f32: x.f32 + 1.0,
+        s: x.s.clone(),
+    })
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() {
     logger::init();
@@ -358,15 +367,7 @@ async fn main() {
     //  &master.source >> &echo.sink;
     &echo.source >> &master.sink;
     // let _snk = pre_process(|x| { Some(x) }, master.sink.sink());
-    &master.source
-        >> pre_process(
-            |_x:Msg| {
-                let mut _y = _x;
-                _y.i32 += 10;
-                Some(_y)
-            },
-            echo.sink.sink(),
-        );
+    &master.source >> pre_process(mapper, echo.sink.sink());
 
     master.source.emit(&Msg {
         i32: 0,

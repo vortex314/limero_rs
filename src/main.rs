@@ -233,9 +233,57 @@ where
 
     fn shr(self, f: F) -> Box<dyn SourceTrait<U>> {
         let ff = Box::new(FuncFlow::<T, U, F>::new(f));
-        self.add_sink( ff  );
+        // self.add_sink( ff  );
         ff
     }
+}
+
+impl<T> Shr<Box<dyn SinkTrait<T>>> for Box<dyn SourceTrait<T>>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    type Output = ();
+    fn shr(self, rhs: Box<dyn SinkTrait<T>>) -> Self::Output {
+        self.add_sink(rhs);
+    }
+}
+
+struct PreProcessor<T, U> {
+    f: Box<dyn Fn(T) -> Option<U> + Send + Sync>,
+    sink: Box<dyn SinkTrait<U>>,
+    t: PhantomData<T>,
+}
+
+impl<T, U> PreProcessor<T, U> {
+    fn new(f: Box<dyn Fn(T) -> Option<U> + Send + Sync>, sink: Box<dyn SinkTrait<U>>) -> Self {
+        PreProcessor::<T, U> {
+            f,
+            sink,
+            t: PhantomData,
+        }
+    }
+}
+
+impl<T, U> SinkTrait<T> for PreProcessor<T, U>
+where
+    T: Clone + Send + Sync + 'static,
+    U: Clone + Send + Sync + 'static,
+{
+    fn push(&self, t: T) {
+        if let Some(u) = (self.f)(t) {
+            self.sink.push(u);
+        }
+    }
+}
+
+fn pre_process<T, U, F>(f: F, sink: Box<dyn SinkTrait<U>>) -> Box<dyn SinkTrait<T>>
+where
+    F: Fn(T) -> Option<U> + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
+    U: Clone + Send + Sync + 'static,
+{
+    let pp = PreProcessor::<T, U>::new(Box::new(f), sink);
+    Box::new(pp)
 }
 
 struct Master {
@@ -307,8 +355,18 @@ async fn main() {
 
     let mut master = Master::new();
     let mut echo = Echo::new();
-    &master.source >> &echo.sink;
+    //  &master.source >> &echo.sink;
     &echo.source >> &master.sink;
+    // let _snk = pre_process(|x| { Some(x) }, master.sink.sink());
+    &master.source
+        >> pre_process(
+            |_x:Msg| {
+                let mut _y = _x;
+                _y.i32 += 10;
+                Some(_y)
+            },
+            echo.sink.sink(),
+        );
 
     master.source.emit(&Msg {
         i32: 0,

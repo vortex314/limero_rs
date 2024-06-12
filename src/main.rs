@@ -18,6 +18,7 @@ use {
     std::{ops::Shr, pin::Pin},
 };
 
+use limero::ActorTrait;
 use minicbor::decode::info;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -32,274 +33,70 @@ use log::error;
 use log::{debug, info};
 use std::error::Error;
 
-trait SinkTrait<M>: Send + Sync {
-    fn push(&self, m: M);
+mod limero;
+use limero::pre_process;
+use limero::ActorRef;
+use limero::Emitter;
+use limero::Sink;
+use limero::Source;
+
+struct Request<T, U> {
+    src: ActorRef<U>,
+    data: T,
 }
 
-trait HasSink<M> {
-    fn sink(&self) -> Box<dyn SinkTrait<M>>;
+enum MasterMsg {
+    Request { src: ActorRef<Msg>, data: Msg },
+    Response { data: Msg },
 }
 
-trait SourceTrait<T> {
-    fn emit(&self, m: &T);
-    fn add_sink(&self, sink: Box<dyn SinkTrait<T>>);
-}
-
-struct Source<M> {
-    senders: Vec<Sender<M>>,
-    sinks: Arc<RwLock<Vec<Box<dyn SinkTrait<M>>>>>,
-}
-
-impl<M> Source<M>
-where
-    M: Clone,
-{
-    fn new() -> Self {
-        Source {
-            senders: Vec::new(),
-            sinks: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
-    fn add_sink(&self, sink: Box<dyn SinkTrait<M>>) {
-        self.sinks.write().unwrap().push(sink);
-    }
-    fn emit(&self, m: &M) {
-        for sender in self.senders.iter() {
-            if sender.try_send(m.clone()).is_err() {
-                error!(" could not send data ");
-            };
-        }
-        for sink in self.sinks.read().unwrap().iter() {
-            sink.push(m.clone());
-        }
-    }
-}
-
-struct Sink<M> {
-    rx: Receiver<M>,
-    tx: Sender<M>,
-}
-
-impl<M> Sink<M>
-where
-    M: Clone + Send + Sync + 'static,
-{
-    fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        Sink { tx, rx }
-    }
-    async fn read(&mut self) -> Option<M> {
-        self.rx.recv().await
-    }
-    fn sender(&self) -> Sender<M> {
-        self.tx.clone()
-    }
-    fn sink(&self) -> Box<dyn SinkTrait<M>>
-    where
-        M: Clone + Send + Sync,
-    {
-        struct Sinker<N> {
-            tx: Arc<Sender<N>>,
-        }
-        impl<N> SinkTrait<N> for Sinker<N>
-        where
-            N: Clone + Send + Sync,
-        {
-            fn push(&self, m: N) {
-                let _ = self.tx.try_send(m).is_err_and(|err| {
-                    error!(" could not send data {:?}", err);
-                    false
-                });
-            }
-        }
-        Box::new(Sinker::<M> {
-            tx: Arc::new(self.tx.clone()),
-        })
-    }
-}
-
-/*impl<T> HasSink<T> for Sink<T> where T:Clone+Send+Sync+'static{
-    fn sink(&self) -> Box<dyn SinkTrait<T>> {
-        struct Sinker<N> {
-            tx:Arc<Sender<N>>
-        }
-        impl<N> SinkTrait<N> for Sinker<N> where N:Clone+Send+Sync  {
-            fn push(&self,m:N) {
-                let _r = self.tx.try_send(m);
-            }
-        }
-        Box::new( Sinker::<T> { tx : Arc::new(self.tx.clone()) })
-    }
-}*/
-
-impl<M> SinkTrait<M> for Sink<M>
-where
-    M: Clone + Send + Sync,
-{
-    fn push(&self, m: M) {
-        let _r = self.tx.try_send(m);
-    }
-}
-
-impl<M> Shr<Box<dyn SinkTrait<M>>> for &Source<M>
-where
-    M: Clone + Send + Sync,
-{
-    type Output = ();
-    fn shr(self, rhs: Box<dyn SinkTrait<M>>) -> Self::Output {
-        self.add_sink(rhs);
-    }
-}
-
-impl<M> Shr<&Sink<M>> for &Source<M>
-where
-    M: Clone + Send + Sync + 'static,
-{
-    type Output = ();
-    fn shr(self, rhs: &Sink<M>) -> Self::Output
-    where
-        M: Clone + Send + Sync,
-    {
-        self >> rhs.sink();
-    }
-}
-// =====================================  FuncFlow =====================================
-struct FuncFlow<T, U, F>
-where
-    F: Fn(T) -> Option<U> + Send + Sync,
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-    f: F,
-    sinks: Arc<RwLock<Vec<Box<dyn SinkTrait<U>>>>>,
-    t: PhantomData<T>,
-}
-
-impl<T, U, F> FuncFlow<T, U, F>
-where
-    F: Fn(T) -> Option<U> + Send + Sync,
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-    fn new(f: F) -> Self {
-        FuncFlow::<T, U, F> {
-            f,
-            sinks: Arc::new(RwLock::new(Vec::new())),
-            t: PhantomData,
-        }
-    }
-}
-
-impl<T, U, F> SinkTrait<T> for FuncFlow<T, U, F>
-where
-    F: Fn(T) -> Option<U> + Send + Sync,
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-    fn push(&self, t: T)
-    where
-        T: Clone + Send + Sync,
-        U: Clone + Send + Sync,
-    {
-        if let Some(u) = (self.f)(t) {
-            self.emit(&u.clone());
-        }
-    }
-}
-
-impl<T, U, F> SourceTrait<U> for FuncFlow<T, U, F>
-where
-    F: Fn(T) -> Option<U> + Send + Sync,
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-    fn emit(&self, t: &U) {
-        for sink in self.sinks.read().unwrap().iter() {
-            sink.push(t.clone());
-        }
-    }
-    fn add_sink(&self, sink: Box<dyn SinkTrait<U>>) {
-        self.sinks.write().unwrap().push(sink);
-    }
-}
-//====================================== Shr =====================================
-impl<T, U, F> Shr<F> for Source<T>
-where
-    F: Fn(T) -> Option<U> + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-    U: Clone + Send + Sync + 'static,
-{
-    type Output = Box<dyn SourceTrait<U>>;
-
-    fn shr(self, f: F) -> Box<dyn SourceTrait<U>> {
-        let ff = Box::new(FuncFlow::<T, U, F>::new(f));
-        // self.add_sink( ff  );
-        ff
-    }
-}
-
-impl<T> Shr<Box<dyn SinkTrait<T>>> for Box<dyn SourceTrait<T>>
-where
-    T: Clone + Send + Sync + 'static,
-{
-    type Output = ();
-    fn shr(self, rhs: Box<dyn SinkTrait<T>>) -> Self::Output {
-        self.add_sink(rhs);
-    }
-}
-
-struct PreProcessor<T, U> {
-    f: Box<dyn Fn(T) -> Option<U> + Send + Sync>,
-    sink: Box<dyn SinkTrait<U>>,
-    t: PhantomData<T>,
-}
-
-impl<T, U> PreProcessor<T, U> {
-    fn new(f: Box<dyn Fn(T) -> Option<U> + Send + Sync>, sink: Box<dyn SinkTrait<U>>) -> Self {
-        PreProcessor::<T, U> {
-            f,
-            sink,
-            t: PhantomData,
-        }
-    }
-}
-
-impl<T, U> SinkTrait<T> for PreProcessor<T, U>
-where
-    T: Clone + Send + Sync + 'static,
-    U: Clone + Send + Sync + 'static,
-{
-    fn push(&self, t: T) {
-        if let Some(u) = (self.f)(t) {
-            self.sink.push(u);
-        }
-    }
-}
-
-fn pre_process<T, U, F>(f: F, sink: Box<dyn SinkTrait<U>>) -> Box<dyn SinkTrait<T>>
-where
-    F: Fn(T) -> Option<U> + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-    U: Clone + Send + Sync + 'static,
-{
-    let pp = PreProcessor::<T, U>::new(Box::new(f), sink);
-    Box::new(pp)
+enum MasterEvent {
+    Event { time: u64 },
 }
 
 struct Master {
-    pub sink: Sink<Msg>,
-    pub source: Source<Msg>,
+    sender: Sender<MasterMsg>,
+    receiver: Receiver<MasterMsg>,
+    emitter: Emitter<MasterEvent>,
 }
 
 impl Master {
     pub fn new() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(100);
         Master {
-            sink: Sink::new(),
-            source: Source::new(),
+            sender,
+            receiver,
+            emitter: Emitter::new(),
         }
     }
     async fn run(&mut self) {
         info!("Master started");
+        loop {
+            let x = self.receiver.recv().await;
+            if let Some(mut x) = x {
+                match x {
+                    MasterMsg::Request { src, data } => {
+                        data.i32 += 1;
+                        src.tell(data);
+                    }
+                    MasterMsg::Response { data } => {
+                        if data.i32 % 100000 == 0 {
+                            info!("Master sent : {:?}", data);
+                        }
+                    }
+                }
+            } else {
+                info!("Master received None");
+            }
+        }
+    }
+}
+
+impl ActorTrait<MasterMsg, MasterEvent> for Master {
+    async fn run() {
+        info!("Master started");
+        let mut requests = BTreeMap::new();
+        let mut id = 0;
         loop {
             let x = self.sink.read().await;
             if let Some(mut x) = x {
@@ -312,6 +109,12 @@ impl Master {
                 info!("Master received None");
             }
         }
+    }
+    fn actor_ref(&self) -> ActorRef<MasterMsg> {
+        ActorRef::new(self.sink.sender.clone())
+    }
+    fn add_listener(&self, listener: ActorRef<MasterMsg>) {
+        self.source.add_sink(listener);
     }
 }
 

@@ -18,7 +18,6 @@ use {
     std::{ops::Shr, pin::Pin},
 };
 
-use limero::ActorTrait;
 use minicbor::decode::info;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -34,158 +33,164 @@ use log::{debug, info};
 use std::error::Error;
 
 mod limero;
-use limero::pre_process;
-use limero::ActorRef;
-use limero::Emitter;
 use limero::Sink;
+use limero::SinkRef;
 use limero::Source;
+use limero::SinkTrait;
 
-struct Request<T, U> {
-    src: ActorRef<U>,
-    data: T,
+#[derive(Clone)]
+struct Data {
+    i32: i32,
+    i64: i64,
+    f32: f32,
+    s: String,
 }
 
-enum MasterMsg {
-    Request { src: ActorRef<Msg>, data: Msg },
-    Response { data: Msg },
+#[derive( Clone)]
+enum PingPongMsg {
+    Ping {
+        src: SinkRef<PingPongMsg>,
+        data: Data,
+    },
+    Pong {
+        data: Data,
+    },
 }
 
-enum MasterEvent {
-    Event { time: u64 },
+struct Pinger {
+    sink: Sink<PingPongMsg>,
+    ponger: SinkRef<PingPongMsg>,
 }
 
-struct Master {
-    sender: Sender<MasterMsg>,
-    receiver: Receiver<MasterMsg>,
-    emitter: Emitter<MasterEvent>,
-}
 
-impl Master {
-    pub fn new() -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::channel(100);
-        Master {
-            sender,
-            receiver,
-            emitter: Emitter::new(),
+impl Pinger {
+    pub fn new(ponger: SinkRef<PingPongMsg>) -> Self {
+        Pinger {
+            sink: Sink::new(5),
+            ponger,
         }
     }
+
     async fn run(&mut self) {
-        info!("Master started");
-        loop {
-            let x = self.receiver.recv().await;
-            if let Some(mut x) = x {
-                match x {
-                    MasterMsg::Request { src, data } => {
-                        data.i32 += 1;
-                        src.tell(data);
-                    }
-                    MasterMsg::Response { data } => {
-                        if data.i32 % 100000 == 0 {
-                            info!("Master sent : {:?}", data);
-                        }
-                    }
-                }
-            } else {
-                info!("Master received None");
-            }
-        }
-    }
-}
-
-impl ActorTrait<MasterMsg, MasterEvent> for Master {
-    async fn run() {
-        info!("Master started");
-        let mut requests = BTreeMap::new();
-        let mut id = 0;
-        loop {
-            let x = self.sink.read().await;
-            if let Some(mut x) = x {
-                x.i32 += 1;
-                self.source.emit(&x);
-                if x.i32 % 100000 == 0 {
-                    info!("Master sent : {:?}", x);
-                }
-            } else {
-                info!("Master received None");
-            }
-        }
-    }
-    fn actor_ref(&self) -> ActorRef<MasterMsg> {
-        ActorRef::new(self.sink.sender.clone())
-    }
-    fn add_listener(&self, listener: ActorRef<MasterMsg>) {
-        self.source.add_sink(listener);
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Msg {
-    pub i32: i32,
-    pub i64: i64,
-    pub f32: f32,
-    pub s: String,
-}
-
-struct Echo {
-    pub sink: Sink<Msg>,
-    pub source: Source<Msg>,
-}
-
-impl Echo {
-    pub fn new() -> Self {
-        Echo {
-            sink: Sink::new(),
-            source: Source::new(),
-        }
-    }
-    async fn run(&mut self) {
-        info!("Echo started");
+        info!("Pinger started");
+        self.ponger.push(PingPongMsg::Ping {
+            src: self.sink.sink_ref(),
+            data: Data {
+                i32: 0,
+                i64: 0,
+                f32: 0.0,
+                s: "Hello".to_string(),
+            },
+        });
 
         loop {
             let x = self.sink.read().await;
             if let Some(x) = x {
-                self.source.emit(&x);
+                match x {
+                    PingPongMsg::Pong { mut data } => {
+                        data.i32 += 1;
+                        if  data.i32 % 100000 == 0 {
+                            info!("Pinger received Pong {} ",data.i32);};
+                        if data.i32 == 1_000_000 {
+                            info!("Pinger received Pong {} stopping.. ",data.i32);
+                            break;
+                        }
+                        self.ponger.push(PingPongMsg::Ping { src:self.sink.sink_ref(),data });
+
+                    }
+                    _ => {}
+                }
             } else {
-                info!("Echo received None");
+                info!("Pinger received None");
             }
         }
     }
 }
 
-fn mapper(x: Msg) -> Option<Msg> {
-    Some(Msg {
-        i32: x.i32 + 1,
-        i64: x.i64 + 1,
-        f32: x.f32 + 1.0,
-        s: x.s.clone(),
-    })
+
+struct Ponger {
+    sink: Sink<PingPongMsg>,
+}
+
+impl Ponger {
+    pub fn new() -> Self {
+        Ponger { sink: Sink::new(1) }
+    }
+    pub fn sink_ref(&self)->SinkRef<PingPongMsg> {
+        self.sink.sink_ref()
+    }
+    async fn run(&mut self) {
+        info!("Ponger started");
+
+        loop {
+            let x = self.sink.read().await;
+            if let Some(x) = x {
+                match x {
+                    PingPongMsg::Ping { src,data } => {
+                        src.push(PingPongMsg::Pong { data });
+                    }
+                    _ => {}
+                }
+            } else {
+                info!("Ponger received None");
+            }
+        }
+    }
+}
+
+
+
+
+
+// external interface
+pub enum PubSubEvent {
+    Publish { topic: String, payload: String },
+    Connected,
+    Disconnected,
+}
+pub enum PubSubCmd {
+    Publish { topic: String, payload: String },
+}
+
+pub enum LinkEvent {
+    Connected,
+    Disconnected,
+}
+
+struct PubSub {
+    events: Source<PubSubEvent>,
+    queue: Sink<PubSubCmd>,
+    link: SinkRef<LinkEvent>,
+    state: PubSubState,
+}
+
+enum PubSubState {
+    Disconnected,
+    Connected,
+}
+
+pub enum PubSubWire {
+    Publish { id: u16, payload: String },
+    Subscribe { topic: String },
+    SubAck,
+    Register { topic: String, id: u16 },
+    RegAck { id: u16 },
+    Connect,
+    Disconnect,
 }
 
 #[tokio::main(worker_threads = 2)]
 async fn main() {
     logger::init();
-
-    let mut master = Master::new();
-    let mut echo = Echo::new();
-    //  &master.source >> &echo.sink;
-    &echo.source >> &master.sink;
-    // let _snk = pre_process(|x| { Some(x) }, master.sink.sink());
-    &master.source >> pre_process(mapper, echo.sink.sink());
-
-    master.source.emit(&Msg {
-        i32: 0,
-        i64: 0,
-        f32: 0.0,
-        s: "Hello".to_string(),
+    let mut ponger = Ponger::new();
+    let mut pinger = Pinger::new(ponger.sink_ref());
+    let pinger_task = tokio::spawn(async move {
+        pinger.run().await;
     });
-
-    let master_task = tokio::spawn(async move {
-        master.run().await;
+    let ponger_task = tokio::spawn(async move {
+        ponger.run().await;
     });
-    let echo_task = tokio::spawn(async move {
-        echo.run().await;
-    });
-    let _ = tokio::join!(master_task, echo_task);
+    let _ = tokio::join!(ponger_task, pinger_task);
     // sleep
     tokio::time::sleep(Duration::from_secs(1000)).await;
 }

@@ -40,7 +40,9 @@ pub trait SinkTrait<M>: Send + Sync {
 pub trait SourceTrait<M>: Send + Sync {
      fn add_listener(&mut self, sink: &dyn SinkTrait<M>) ;
 }
-pub trait Flow<T,U> : SinkTrait<T> + SourceTrait<U>  where T:Clone+Send+Sync,U:Clone+Send+Sync {
+pub trait Flow<T,U> //: SinkTrait<T> + SourceTrait<U>  where T:Clone+Send+Sync,U:Clone+Send+Sync 
+
+{
     fn push(&self,t:T) ;
     fn add_listener(&mut self, sink: &dyn SinkTrait<U>) ;
 }
@@ -51,10 +53,8 @@ pub struct FlowImpl<T,U> {
 }
 
 impl<T,U> Flow<T,U> for FlowImpl<T,U> where T:Clone+Send+Sync,U:Clone+Send+Sync {
-    fn push(&self,t:T) {
-        
-    }
-    fn add_listener(&mut self, sender: &dyn SinkTrait<U>) {
+    fn push(&self,_t:T) {}
+    fn add_listener(&mut self, _sender: &dyn SinkTrait<U>) {
     }
 }
 
@@ -107,7 +107,7 @@ impl<M> SinkTrait<M> for SinkRef<M> where M:Clone+Send+Sync{
         self.sender.try_send(message).unwrap();
     }
 }
-
+/* 
 
 pub struct Source<T> {
     sinks: Vec<SinkRef<T>>,
@@ -125,57 +125,42 @@ impl<T> Source<T> {
             sink.push(m.clone());
         }
     }
-}
-
-#[derive( Clone)]
-enum PubSubReq {
-    Subscribe { topic : String , dst : Option<SinkRef<PubSubEvent>> },
-    Unsubscribe { dst : Option<SinkRef<PubSubEvent>> },
-    Publish { event : PubSubEvent },
-}
-
-enum PubSubResp {
-    Subscribed,
-    Unsubscribed,
-    Published,
-    Failed,
-}
-#[derive(Clone)]
-enum LinkEvent {
-    Connected,
-    Disconnected,
-    Recv { data : Vec<u8> }
-}
-#[derive(Clone)]
-enum LinkReq {
-    Connect,
-    Disconnect,
-    Send { data : Vec<u8> }
-}
-#[derive(Clone)]
-enum PubSubEvent {
-    Connected ,
-    Disconnected ,
-    Publish { topic : String, data : Vec<u8> }
-}
-
-struct PubSub {
-    sink : Sink<PubSubReq>,
-    sink_link_events : Sink<LinkEvent>,
-    events : Source<PubSubEvent>,
-}
-
-
-/* 
-impl<M> Shr<SinkRef<M>> for &Source<M>
-where
-    M: Clone + Send + Sync,
-{
-    type Output = ();
-    fn shr(self, rhs: SinkRef<M>) -> Self::Output {
-        self.add_listener(rhs);
-    }
 }*/
 
+pub struct Src<T> {
+    sinks: Vec<Box<dyn SinkTrait<T>>>,
+}
 
-// =====================================  FuncFlow =====================================
+impl<T> Src<T> {
+    pub fn new() -> Self {
+        Self { sinks: Vec::new() }
+    }
+    pub fn add_listener(&mut self, sink : Box<dyn SinkTrait<T>>) {
+        self.sinks.push(sink);
+    }
+    pub fn emit(&self, m: T) where T:Clone+Send+Sync {
+        for sink in self.sinks.iter() {
+            sink.push(m.clone());
+        }
+    }
+}
+
+pub struct SinkFunction<T,U> {
+    func: Box< dyn Fn(T) ->U >,
+    sink : Box<dyn SinkTrait<U>>,
+}
+
+impl <T,U> SinkFunction<T,U> {
+    pub fn new(func: dyn Fn(T) ->U , sink: Box<dyn SinkTrait<U>>) -> Self where T:Clone+Send+Sync,U:Clone+Send+Sync, dyn Fn(T) ->U:Clone+Send+Sync{
+        SinkFunction { func:Box::new(func),sink}
+    }
+}
+
+impl<T,U> SinkTrait<T> for SinkFunction<T,U> where T:Clone+Send+Sync,U:Clone+Send+Sync,dyn Fn(T) ->U:Clone+Send+Sync {
+    fn push(&self, t: T) {
+        let u = (self.func)(t);
+        self.sink.push(u);
+    }
+}
+
+

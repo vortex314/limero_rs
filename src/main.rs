@@ -164,7 +164,7 @@ impl Led {
 }
 
 impl SinkTrait<LedCmd> for Led {
-    fn push(&self, message: LedCmd) {
+    fn push(&self, _message: LedCmd) {
         
     }
 }
@@ -273,7 +273,6 @@ pub enum PubSubWire {
 }
 
 #[derive(Clone)]
-
 pub enum LinkEvent {
     Connected,
     Disconnected,
@@ -304,6 +303,10 @@ impl Link {
         Box::new(self.sink.sink_ref())
     }
 
+    pub fn events(&self) -> &Src<LinkEvent> {
+        &self.events
+    }
+
     async fn run(&mut self) {
         info!("Link started");
         loop {
@@ -330,7 +333,7 @@ impl Link {
     }
 }
 
-fn map_recv_to_pulse(link_event: LinkEvent) -> Option<LedCmd> {
+fn map_recv_to_pulse(link_event: LinkEvent) -> Option<LedCmd>  {
     match link_event {
         LinkEvent::Recv { payload: _ } => {
             Some(LedCmd::Pulse { duration: 1000 })
@@ -350,8 +353,8 @@ async fn main() {
     let mut pubsub = PubSub::new(link.cmd_sink());
     let led = Led::new();
     link.add_listener(pubsub.link_sink());
-    let map_recv_to_pulse= SinkFunction::<LinkEvent,LedCmd>::new (map_recv_to_pulse,Box::new(led));
-
+    let mapper= SinkFunction::new (Box::new(map_recv_to_pulse),Box::new(led));
+    link.events().add_listener(Box::new(mapper));
     select! {
             _ = ponger.run() => {}
             _ = pinger.run() => {}

@@ -53,7 +53,9 @@ where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    fn push(&self, _t: T) {}
+    fn push(&self, _t: T) {
+        self.sink.borrow().push(_t);
+    }
     fn add_listener(&mut self, _sender: &dyn SinkTrait<U>) {}
 }
 
@@ -147,28 +149,25 @@ impl<T> Src<T> {
     }
 }
 
-pub struct SinkFunction<F, T, U>
+pub struct SinkFunction< T, U>
 where
-    F: Fn(T) -> Option<U> + Send + Sync,
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    func: Box<F>,
-    sink: Box<dyn SinkTrait<U>>,
+    func: fn(T) -> Option<U>,
+    sink: Box<dyn SinkTrait<U>+Send+Sync>,
     l: PhantomData<T>,
 }
 
-impl<F, T, U> SinkFunction<F, T, U>
+impl< T, U> SinkFunction< T, U>
 where
-    F: Fn(T) -> Option<U> + Send + Sync,
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    pub fn new(func: Box<F>, sink: Box<dyn SinkTrait<U>>) -> Self
+    pub fn new(func: fn(T)-> Option<U>, sink: Box<dyn SinkTrait<U>>) -> Self
     where
         T: Clone + Send + Sync,
         U: Clone + Send + Sync,
-        F: Fn(T) -> Option<U> + Send + Sync,
     {
         SinkFunction {
             func,
@@ -178,12 +177,10 @@ where
     }
 }
 
-impl<F, T, U> SinkTrait<T> for SinkFunction<F, T, U>
+impl< T, U> SinkTrait<T> for SinkFunction< T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
-    F: Fn(T) -> Option<U> + Send + Sync,
-    dyn Fn(T) -> Option<U>: Send + Sync + 'static,
 {
     fn push(&self, t: T) {
         (self.func)(t).map(|u| self.sink.push(u));

@@ -141,7 +141,7 @@ impl Ponger {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum LedCmd {
     On,
     Off,
@@ -151,25 +151,30 @@ enum LedCmd {
 }
 
 struct Led {
+    sink: Sink<LedCmd>,
     state: bool,
 }
 
 impl Led {
     pub fn new() -> Self {
-        Led { state: false }
+        Led { sink:Sink::new(3),state: false }
     }
-    async fn run() {
+    fn sink_ref(&self) -> SinkRef<LedCmd> {
+        self.sink.sink_ref()
+    }
+    async fn run(&mut self) {
         info!("Led started");
+        loop {
+            sleep(Duration::from_secs(1));
+        }
     }
 }
 
 impl SinkTrait<LedCmd> for Led {
     fn push(&self, _message: LedCmd) {
-        
+        info!("Led received {:?}", _message);
     }
 }
-
-
 
 // external interface
 #[derive(Clone)]
@@ -333,14 +338,10 @@ impl Link {
     }
 }
 
-fn map_recv_to_pulse(link_event: LinkEvent) -> Option<LedCmd>  {
+fn map_recv_to_pulse(link_event: LinkEvent) -> Option<LedCmd> {
     match link_event {
-        LinkEvent::Recv { payload: _ } => {
-            Some(LedCmd::Pulse { duration: 1000 })
-        }
-        _ => {
-            None
-        }
+        LinkEvent::Recv { payload: _ } => Some(LedCmd::Pulse { duration: 1000 }),
+        _ => None,
     }
 }
 
@@ -351,10 +352,11 @@ async fn main() {
     let mut pinger = Pinger::new(ponger.sink_ref());
     let mut link = Link::new();
     let mut pubsub = PubSub::new(link.cmd_sink());
-    let led = Led::new();
+    let mut led = Led::new();
     link.add_listener(pubsub.link_sink());
-    let mapper= SinkFunction::new (Box::new(map_recv_to_pulse),Box::new(led));
-    link.events().add_listener(Box::new(mapper));
+    let pulse_led_on_recv = SinkFunction::new(map_recv_to_pulse, led);
+    link.add_listener(Box::new(pulse_led_on_recv));
+    tokio::spawn(async { led.run().await ;});
     select! {
             _ = ponger.run() => {}
             _ = pinger.run() => {}

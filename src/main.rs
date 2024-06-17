@@ -1,9 +1,6 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
-#[cfg(all(feature = "std", feature = "no_std"))]
-compile_error!("feature \"std\" and feature \"no_std\" cannot be enabled at the same time");
 
-#[cfg(feature = "tokio")]
 use {
     std::borrow::BorrowMut,
     std::cell::RefCell,
@@ -18,7 +15,10 @@ use {
     std::{ops::Shr, pin::Pin},
 };
 
-use limero::SinkFunction;
+use limero::Flow;
+use limero::FlowFunction;
+use limero::FlowMap;
+use limero::SourceTrait;
 use minicbor::decode::info;
 use tokio::select;
 use tokio::sync::mpsc::Receiver;
@@ -165,7 +165,8 @@ impl Led {
     async fn run(&mut self) {
         info!("Led started");
         loop {
-            sleep(Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            info!("Led state {}", self.state);
         }
     }
 }
@@ -338,7 +339,7 @@ impl Link {
     }
 }
 
-fn map_recv_to_pulse(link_event: LinkEvent) -> Option<LedCmd> {
+fn link_recv_to_led_pulse(link_event: LinkEvent) -> Option<LedCmd> {
     match link_event {
         LinkEvent::Recv { payload: _ } => Some(LedCmd::Pulse { duration: 1000 }),
         _ => None,
@@ -354,14 +355,16 @@ async fn main() {
     let mut pubsub = PubSub::new(link.cmd_sink());
     let mut led = Led::new();
     link.add_listener(pubsub.link_sink());
-    let pulse_led_on_recv = SinkFunction::new(map_recv_to_pulse, led);
-    link.add_listener(Box::new(pulse_led_on_recv));
-    tokio::spawn(async { led.run().await ;});
+    let mut pulse_led_on_recv = FlowMap::new(link_recv_to_led_pulse);
+    pulse_led_on_recv.add_listener(Box::new(led.sink_ref()));
+    link.add_listener(Box::new(pulse_led_on_recv ) );
+
     select! {
             _ = ponger.run() => {}
             _ = pinger.run() => {}
             _ = link.run() => {}
             _ = pubsub.run() => {}
+            _ = led.run() => {}
 
     }
 }

@@ -1,9 +1,6 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
-#[cfg(all(feature = "std", feature = "no_std"))]
-compile_error!("feature \"std\" and feature \"no_std\" cannot be enabled at the same time");
 
-#[cfg(feature = "tokio")]
 use {
     std::borrow::BorrowMut,
     std::cell::RefCell,
@@ -36,27 +33,10 @@ pub trait SinkTrait<M>: Send + Sync {
 }
 
 pub trait SourceTrait<M>: Send + Sync {
-    fn add_listener(&mut self, sink: &dyn SinkTrait<M>);
+    fn add_listener(&mut self, sink: Box<dyn SinkTrait<M>>);
 }
-pub trait Flow<T, U> {
-    fn push(&self, t: T);
-    fn add_listener(&mut self, sink: &dyn SinkTrait<U>);
-}
-
-pub struct FlowImpl<T, U> {
-    sink: Rc<RefCell<Vec<T>>>,
-    source: Vec<Box<dyn SinkTrait<U>>>,
-}
-
-impl<T, U> Flow<T, U> for FlowImpl<T, U>
-where
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-    fn push(&self, _t: T) {
-        self.sink.borrow().push(_t);
-    }
-    fn add_listener(&mut self, _sender: &dyn SinkTrait<U>) {}
+pub trait Flow<T, U> : SinkTrait<T> + SourceTrait<U> where T: Clone + Send + Sync, U: Clone + Send + Sync{
+    
 }
 
 pub struct Sink<M> {
@@ -149,40 +129,125 @@ impl<T> Src<T> {
     }
 }
 
-pub struct SinkFunction< T, U>
+pub struct FlowFunction< T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
     func: fn(T) -> Option<U>,
-    sink: Box<dyn SinkTrait<U>+Send+Sync>,
+    src:Src<U>,
     l: PhantomData<T>,
 }
 
-impl< T, U> SinkFunction< T, U>
+impl< T, U> FlowFunction< T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    pub fn new(func: fn(T)-> Option<U>, sink: Box<dyn SinkTrait<U>>) -> Self
+    pub fn new(func: fn(T)-> Option<U>) -> Self
     where
         T: Clone + Send + Sync,
         U: Clone + Send + Sync,
     {
-        SinkFunction {
+        FlowFunction {
             func,
-            sink,
+            src: Src::new(),
             l: PhantomData,
         }
     }
 }
-
-impl< T, U> SinkTrait<T> for SinkFunction< T, U>
+/* 
+impl< T, U> SinkTrait<T> for FlowFunction< T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
     fn push(&self, t: T) {
-        (self.func)(t).map(|u| self.sink.push(u));
+        (self.func)(t).map(|u| self.src.emit(u));
+    }
+}*/
+
+
+impl <T,U> SourceTrait<U> for FlowFunction<T,U> 
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+     fn add_listener(&mut self, sink: Box<dyn SinkTrait<U>>) {
+        self.src.add_listener(sink);
     }
 }
+
+impl <T,U> SinkTrait<T> for FlowFunction<T,U> 
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+    fn push(&self, t: T) {
+        (self.func)(t).map(|u| self.src.emit(u));
+    }
+}
+
+
+
+pub struct FlowMap<T, U>
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+    func: fn(T) -> Option<U>,
+    src: Src<U>,
+    l: PhantomData<T>,
+}
+
+impl<T, U> FlowMap<T, U>
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+    pub fn new(func: fn(T) -> Option<U>) -> Self {
+        FlowMap {
+            func,
+            src: Src::new(),
+            l: PhantomData,
+        }
+    }
+}
+
+impl<T, U> SinkTrait<T> for FlowMap<T, U>
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+    fn push(&self, t: T) {
+        (self.func)(t).map(|u| self.src.emit(u));
+    }
+}
+
+impl<T, U> SourceTrait<U> for FlowMap<T, U>
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
+    fn add_listener(&mut self, sink: Box<dyn SinkTrait<U>>) {
+        self.src.add_listener(sink);
+    }
+}
+
+
+impl <T> Shr<Box<dyn SinkTrait<T>>> for &mut Src<T> {
+    type Output = ();
+     fn shr(self, sink: Box<dyn SinkTrait<T>>) -> () {
+        (*self).add_listener(sink);
+    }
+}
+
+/*pub fn via<'a, 'b, T, U>(src: &'a mut Src<T>, func: fn(T) -> Option<U>) -> Box<FlowFunction<T, U>> 
+where
+    T: 'a + Clone + Send + Sync,
+    U: 'b + Clone + Send + Sync,
+{
+    let ff = Box::new(FlowFunction::new(func));
+    src.add_listener(ff as Box<dyn SinkTrait<T>>);
+    ff
+}*/

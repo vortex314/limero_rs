@@ -29,6 +29,7 @@ use core::result::Result;
 use std::marker::PhantomData;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
+use std::u64::MAX;
 mod logger;
 use log::error;
 use log::{debug, info};
@@ -119,7 +120,7 @@ impl Ponger {
     pub fn new() -> Self {
         Ponger { sink: Sink::new(1) }
     }
-    pub fn sink_ref(&self) -> SinkRef<PingPongMsg> {
+    pub fn sink(&self) -> SinkRef<PingPongMsg> {
         self.sink.sink_ref()
     }
     async fn run(&mut self) {
@@ -146,36 +147,94 @@ enum LedCmd {
     On,
     Off,
     Toggle,
-    Blink { duration: u64 },
-    Pulse { duration: u64 },
+    Blink { msec: u64 },
+    Pulse { msec: u64},
 }
 
+#[derive(PartialEq,Debug)]
+enum LedState {
+    On,
+    Off,
+    Blinking ,
+    Pulsing ,
+}
 struct Led {
     sink: Sink<LedCmd>,
-    state: bool,
+    state: LedState,
+    timeout: Duration
 }
 
 impl Led {
     pub fn new() -> Self {
-        Led { sink:Sink::new(3),state: false }
+        Led {
+            sink: Sink::new(3),
+            state: LedState::Off,
+            timeout: Duration::from_millis(std::u64::MAX)
+        }
     }
-    fn sink_ref(&self) -> SinkRef<LedCmd> {
+    fn sink(&self) -> SinkRef<LedCmd> {
         self.sink.sink_ref()
+    }
+    fn set_state (&mut self,new_state : LedState)  {
+        info!("Led state {:?}", new_state);
+        self.state = new_state;
     }
     async fn run(&mut self) {
         info!("Led started");
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            info!("Led state {}", self.state);
+            select! {
+                _ = tokio::time::sleep(self.timeout) => {
+                    info!("Led received Timeout");
+                    if self.state == LedState::Blinking {
+                        self.set_state(LedState::On);
+                    } else if self.state == LedState::Pulsing {
+                        self.set_state(LedState::Off);
+                        self.timeout = Duration::from_millis(std::u64::MAX);
+                    }
+                }
+                led_cmd = self.sink.read() => {
+                    info!("Led received {:?}", led_cmd);
+                    if let Some(led_cmd) = led_cmd {
+                    match led_cmd {
+                        LedCmd::On => {
+                            info!("Led received On");
+                            self.set_state(LedState::On);
+                            self.timeout = Duration::from_millis(std::u64::MAX);
+                        }
+                        LedCmd::Off => {
+                            info!("Led received Off");
+                            self.set_state(LedState::Off);
+                            self.timeout = Duration::from_millis(std::u64::MAX);
+                        }
+                        LedCmd::Toggle => {
+                            info!("Led received Toggle");
+                            self.set_state(if self.state == LedState::Off { LedState::On } else { LedState::Off });
+                            self.timeout = Duration::from_millis(std::u64::MAX);
+                        }
+                        LedCmd::Blink { msec } => {
+                            info!("Led received Blink");
+                            self.set_state(LedState::Blinking);
+                            self.timeout = Duration::from_millis(msec);
+                        }
+                        LedCmd::Pulse { msec } => {
+                            info!("Led received Pulse");
+                            self.set_state(LedState::Pulsing);
+                            self.timeout = Duration::from_millis(msec);
+                        }
+                    }
+                }
+            }
+            }
         }
     }
 }
 
 impl SinkTrait<LedCmd> for Led {
     fn push(&self, _message: LedCmd) {
-        info!("Led received {:?}", _message);
+        self.sink.push(_message); 
     }
 }
+
 
 // external interface
 #[derive(Clone)]
@@ -302,15 +361,8 @@ impl Link {
             sink: Sink::new(5),
         }
     }
-    pub fn add_listener(&mut self, sink: Box<dyn SinkTrait<LinkEvent>>) {
-        self.events.add_listener(sink);
-    }
-    pub fn cmd_sink(&self) -> Box<dyn SinkTrait<LinkCmd>> {
+    pub fn sink(&self) -> Box<dyn SinkTrait<LinkCmd>> {
         Box::new(self.sink.sink_ref())
-    }
-
-    pub fn events(&self) -> &Src<LinkEvent> {
-        &self.events
     }
 
     async fn run(&mut self) {
@@ -339,25 +391,45 @@ impl Link {
     }
 }
 
+impl SourceTrait<LinkEvent> for Link {
+    fn add_listener(&mut self, sink: Box<dyn SinkTrait<LinkEvent>>) {
+        self.events.add_listener(sink);
+    }
+}
+
 fn link_recv_to_led_pulse(link_event: LinkEvent) -> Option<LedCmd> {
     match link_event {
-        LinkEvent::Recv { payload: _ } => Some(LedCmd::Pulse { duration: 1000 }),
+        LinkEvent::Recv { payload: _ } => Some(LedCmd::Pulse { msec: 100 }),
         _ => None,
     }
+}
+
+fn via<T>( src:&mut dyn SourceTrait<T>,sink : Box<dyn SinkTrait<T>>) {
+    src.add_listener(sink);
+}
+
+fn connect<T,U>(src: &mut dyn SourceTrait<T>, func : fn(T)->Option<U>, sink: SinkRef<U>) where T:Clone+Send+Sync+'static, U:Clone+Send+Sync+'static {
+    let mut flow = FlowFunction::new(func);
+    flow.add_listener(Box::new(sink));
+    src.add_listener(Box::new(flow));
 }
 
 #[tokio::main(worker_threads = 1)]
 async fn main() {
     logger::init();
     let mut ponger = Ponger::new();
-    let mut pinger = Pinger::new(ponger.sink_ref());
+    let mut pinger = Pinger::new(ponger.sink());
     let mut link = Link::new();
-    let mut pubsub = PubSub::new(link.cmd_sink());
+    let mut pubsub = PubSub::new(link.sink());
     let mut led = Led::new();
     link.add_listener(pubsub.link_sink());
-    let mut pulse_led_on_recv = FlowMap::new(link_recv_to_led_pulse);
-    pulse_led_on_recv.add_listener(Box::new(led.sink_ref()));
-    link.add_listener(Box::new(pulse_led_on_recv ) );
+
+    let ff = FlowFunction::new(link_recv_to_led_pulse);
+
+    &mut link  >> ff ; //ff>> led.sink();
+
+    connect(&mut link, link_recv_to_led_pulse, led.sink());
+    connect(&mut link, |_x| { Some(LedCmd::Pulse{ msec:100}) } , led.sink());
 
     select! {
             _ = ponger.run() => {}

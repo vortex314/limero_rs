@@ -28,15 +28,18 @@ use std::marker::PhantomData;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
 
-pub trait SinkTrait<M>: Send + Sync {
+pub trait SinkTrait<M>: Send + Sync  {
     fn push(&self, m: M);
 }
 
 pub trait SourceTrait<M>: Send + Sync {
     fn add_listener(&mut self, sink: Box<dyn SinkTrait<M>>);
 }
-pub trait Flow<T, U> : SinkTrait<T> + SourceTrait<U> where T: Clone + Send + Sync, U: Clone + Send + Sync{
-    
+pub trait Flow<T, U>: SinkTrait<T> + SourceTrait<U>
+where
+    T: Clone + Send + Sync,
+    U: Clone + Send + Sync,
+{
 }
 
 pub struct Sink<M> {
@@ -88,26 +91,6 @@ where
         self.sender.try_send(message).unwrap();
     }
 }
-/*
-
-pub struct Source<T> {
-    sinks: Vec<SinkRef<T>>,
-}
-
-impl<T> Source<T> {
-    pub fn new() -> Self {
-        Source { sinks: Vec::new() }
-    }
-    pub fn add_listener(&mut self, sender: SinkRef<T>) {
-        self.sinks.push(sender);
-    }
-    pub fn emit(&self, m: T) where T:Clone+Send+Sync {
-        for sink in self.sinks.iter() {
-            sink.push(m.clone());
-        }
-    }
-}*/
-
 pub struct Src<T> {
     sinks: Vec<Box<dyn SinkTrait<T>>>,
 }
@@ -115,9 +98,6 @@ pub struct Src<T> {
 impl<T> Src<T> {
     pub fn new() -> Self {
         Self { sinks: Vec::new() }
-    }
-    pub fn add_listener(&mut self, sink: Box<dyn SinkTrait<T>>) {
-        self.sinks.push(sink);
     }
     pub fn emit(&self, m: T)
     where
@@ -129,22 +109,31 @@ impl<T> Src<T> {
     }
 }
 
-pub struct FlowFunction< T, U>
+impl<T> SourceTrait<T> for Src<T>
+where
+    T: Clone + Send + Sync,
+{
+    fn add_listener(&mut self, sink: Box<dyn SinkTrait<T>>) {
+        self.sinks.push(sink);
+    }
+}
+
+pub struct FlowFunction<T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
     func: fn(T) -> Option<U>,
-    src:Src<U>,
+    src: Src<U>,
     l: PhantomData<T>,
 }
 
-impl< T, U> FlowFunction< T, U>
+impl<T, U> FlowFunction<T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    pub fn new(func: fn(T)-> Option<U>) -> Self
+    pub fn new(func: fn(T) -> Option<U>) -> Self
     where
         T: Clone + Send + Sync,
         U: Clone + Send + Sync,
@@ -156,29 +145,18 @@ where
         }
     }
 }
-/* 
-impl< T, U> SinkTrait<T> for FlowFunction< T, U>
+
+impl<T, U> SourceTrait<U> for FlowFunction<T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
 {
-    fn push(&self, t: T) {
-        (self.func)(t).map(|u| self.src.emit(u));
-    }
-}*/
-
-
-impl <T,U> SourceTrait<U> for FlowFunction<T,U> 
-where
-    T: Clone + Send + Sync,
-    U: Clone + Send + Sync,
-{
-     fn add_listener(&mut self, sink: Box<dyn SinkTrait<U>>) {
+    fn add_listener(&mut self, sink: Box<dyn SinkTrait<U>>) {
         self.src.add_listener(sink);
     }
 }
 
-impl <T,U> SinkTrait<T> for FlowFunction<T,U> 
+impl<T, U> SinkTrait<T> for FlowFunction<T, U>
 where
     T: Clone + Send + Sync,
     U: Clone + Send + Sync,
@@ -187,8 +165,6 @@ where
         (self.func)(t).map(|u| self.src.emit(u));
     }
 }
-
-
 
 pub struct FlowMap<T, U>
 where
@@ -234,20 +210,19 @@ where
     }
 }
 
-
-impl <T> Shr<Box<dyn SinkTrait<T>>> for &mut Src<T> {
+impl<T> Shr<Box<dyn SinkTrait<T>>> for &mut dyn SourceTrait<T> {
     type Output = ();
-     fn shr(self, sink: Box<dyn SinkTrait<T>>) -> () {
+    fn shr(self, sink: Box<dyn SinkTrait<T>>) -> () {
         (*self).add_listener(sink);
     }
 }
 
-/*pub fn via<'a, 'b, T, U>(src: &'a mut Src<T>, func: fn(T) -> Option<U>) -> Box<FlowFunction<T, U>> 
-where
-    T: 'a + Clone + Send + Sync,
-    U: 'b + Clone + Send + Sync,
-{
-    let ff = Box::new(FlowFunction::new(func));
-    src.add_listener(ff as Box<dyn SinkTrait<T>>);
-    ff
-}*/
+impl<T> Shr<&dyn SinkTrait<T>> for &mut dyn SourceTrait<T> where T: Clone + Send + Sync,dyn SinkTrait<T>: Clone + Send + Sync {
+    type Output = ();
+    fn shr(self, sink: &dyn SinkTrait<T>) -> () {
+       // let _s = sink.clone();
+        
+        let _x = Box::new(sink.clone());
+        (*self).add_listener(_x);
+    }
+}
